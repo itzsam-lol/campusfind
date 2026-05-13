@@ -1,0 +1,161 @@
+// CampusFind — Prisma schema (SQLite)
+// Use `npx prisma db push` to create the dev DB at prisma/dev.db.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Identity ───────────────────────────────────────────────────────────────
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  campus       String   // e.g. "IGDTUW", "IIIT Delhi"
+  role         String   @default("user") // user | admin
+  createdAt    DateTime @default(now())
+  lastLoginAt  DateTime?
+
+  listings     Listing[]
+  claimsMade   Claim[]   @relation("claimsByUser")
+  messages    Message[]
+  notifications Notification[]
+  broadcasts   Broadcast[]
+}
+
+// One-time code records. We store a bcrypt hash of the OTP and an attempts counter.
+model OtpToken {
+  id           String   @id @default(cuid())
+  email        String
+  campus       String
+  codeHash     String
+  expiresAt    DateTime
+  attempts     Int      @default(0)
+  consumed     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  ipHash       String?  // optional, for abuse forensics — never stores raw IP
+
+  @@index([email])
+  @@index([expiresAt])
+}
+
+// Sliding-window rate-limit buckets (per identifier + scope).
+model RateLimit {
+  id          String   @id @default(cuid())
+  scope       String   // "otp:request" | "otp:verify" | "post:listing" etc
+  identifier  String   // email or session id
+  count       Int      @default(0)
+  windowStart DateTime @default(now())
+
+  @@unique([scope, identifier])
+  @@index([windowStart])
+}
+
+// ─── Listings + media ───────────────────────────────────────────────────────
+model Listing {
+  id           String   @id @default(cuid())
+  kind         String   // "found" | "lost"
+  title        String
+  description  String
+  category     String   // electronics | documents | keys | clothing | accessories | other
+  campus       String
+  locationName String
+  locationLat  Float?
+  locationLng  Float?
+  happenedAt   DateTime
+  handover     String   // "desk" | "keep"
+  status       String   @default("open") // open | claimed | returned | closed | removed | flagged
+  flagged      Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownerId      String
+  owner        User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  photos       Photo[]
+  claims       Claim[]
+
+  @@index([campus, status, createdAt])
+  @@index([category])
+  @@index([ownerId])
+}
+
+model Photo {
+  id        String   @id @default(cuid())
+  listingId String
+  // Stored as data URL (data:image/...;base64,...). For prod swap to S3.
+  data      String
+  tone      String?  // optional palette hint
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId])
+}
+
+// ─── Claims + chat ──────────────────────────────────────────────────────────
+model Claim {
+  id          String   @id @default(cuid())
+  listingId   String
+  claimantId  String
+  description String   // private ownership proof; finder sees this, public does not
+  status      String   @default("pending") // pending | approved | rejected | returned
+  createdAt   DateTime @default(now())
+  decidedAt   DateTime?
+  returnedAt  DateTime?
+
+  listing     Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  claimant    User     @relation("claimsByUser", fields: [claimantId], references: [id], onDelete: Cascade)
+  messages    Message[]
+
+  @@unique([listingId, claimantId])
+  @@index([status])
+}
+
+model Message {
+  id          String   @id @default(cuid())
+  claimId     String
+  authorId    String?  // null = system message
+  kind        String   @default("text") // text | system
+  body        String
+  createdAt   DateTime @default(now())
+
+  claim       Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  author      User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([claimId, createdAt])
+}
+
+// ─── Notifications & broadcasts ─────────────────────────────────────────────
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  kind      String   // claim_received | claim_approved | claim_rejected | new_match | desk_drop | broadcast
+  title     String
+  body      String
+  data      String?  // JSON-encoded
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model Broadcast {
+  id          String   @id @default(cuid())
+  authorId    String
+  campus      String
+  audience    String   @default("all") // all | students | admins
+  title       String
+  body        String
+  scheduledAt DateTime?
+  sentAt      DateTime?
+  createdAt   DateTime @default(now())
+
+  author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([campus, scheduledAt])
+}
